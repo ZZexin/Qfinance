@@ -673,35 +673,53 @@ with tab5:
             except Exception:
                 pass
 
-    # ── Cloud connection panel ────────────────────────────────────
-    with st.expander("☁️ 云端连接（GitHub Gist）",
-                     expanded=not st.session_state.pf_connected):
-        st.caption("获取 Token：github.com/settings/tokens → Generate new token → 勾选 **gist** 权限")
-        col_t, col_g = st.columns([3, 2])
-        inp_token = col_t.text_input("GitHub Personal Access Token",
-                                     value=st.session_state.pf_token,
-                                     type="password", key="inp_token")
-        inp_gist  = col_g.text_input("Gist ID（留空自动创建）",
-                                     value=st.session_state.pf_gist_id,
-                                     key="inp_gist")
+    # ── Already connected: show minimal status bar, no expander needed ──
+    if st.session_state.pf_connected:
+        cb1, cb2 = st.columns([5, 1])
+        cb1.caption(f"☁️ 已连接 Gist `{st.session_state.pf_gist_id}`")
+        if cb2.button("断开", use_container_width=True, key="disconnect"):
+            st.session_state.update({"pf_connected": False, "pf_token": "",
+                                      "pf_gist_id": "", "pf_data": None})
+            st.rerun()
 
-        # ── Token type hint ───────────────────────────────────────────
+    # ── Not connected: show one-time setup wizard ─────────────────
+    else:
+        st.markdown("""
+### ☁️ 一次配置，永久免登录
+
+持仓数据存在你的 **GitHub 私有 Gist**，只需设置一次。
+
+#### 第一步：生成 GitHub Token
+> 打开 **[github.com/settings/tokens](https://github.com/settings/tokens/new)**
+> → Note 填 `qfinance`
+> → 勾选 **`gist`** 权限（Classic token）
+> → Generate token，复制 `ghp_...` 开头的内容
+""")
+
+        inp_token = st.text_input("粘贴 GitHub Token",
+                                   value=st.session_state.pf_token,
+                                   type="password", placeholder="ghp_xxxxxxxxxxxx",
+                                   key="inp_token")
+        inp_gist  = st.text_input("Gist ID（首次留空，自动创建）",
+                                   value=st.session_state.pf_gist_id,
+                                   placeholder="留空则自动创建",
+                                   key="inp_gist")
+
         if inp_token.startswith("github_pat_"):
             st.warning(
-                "⚠️ 检测到 Fine-grained token。请确认创建时已勾选：\n"
-                "**Account permissions → Gists → Access: Read and write**\n\n"
-                "如果没有勾选，请删除并重新生成，或改用 **Classic token**（推荐）：\n"
-                "github.com/settings/tokens/new → 勾选 **gist** → Generate token"
+                "检测到 Fine-grained token，需要在 **Account permissions → Gists → Read and write** 勾选权限。\n"
+                "建议改用 Classic token（`ghp_` 开头）更简单。"
             )
 
-        if st.button("连接 / 创建 Gist", use_container_width=True, type="primary"):
+        if st.button("🔗 连接 / 创建 Gist", use_container_width=True,
+                     type="primary", key="connect_btn"):
             if not inp_token:
-                st.warning("请输入 GitHub Token")
+                st.warning("请粘贴 GitHub Token")
             else:
                 with st.spinner("验证 Token..."):
                     ok, user_or_err = cloud.test_token(inp_token)
                 if not ok:
-                    st.error(f"❌ Token 验证失败：{user_or_err}")
+                    st.error(f"❌ Token 无效：{user_or_err}")
                 else:
                     gist_id = inp_gist.strip()
                     try:
@@ -717,30 +735,32 @@ with tab5:
                         st.error(f"❌ 连接失败：{e}")
                         st.stop()
 
-                    # Save credentials (may fail on Streamlit Cloud)
-                    manual_toml = cloud.save_credentials(inp_token, gist_id)
+                    cloud.save_credentials(inp_token, gist_id)   # local; may no-op on Cloud
                     st.session_state.update({
                         "pf_token": inp_token, "pf_gist_id": gist_id,
                         "pf_data": pf_data, "pf_connected": True,
                     })
-                    st.success(f"✅ 已连接 GitHub @{user_or_err}  ·  Gist: `{gist_id}`")
-                    if manual_toml:
-                        st.info(
-                            "📋 **Streamlit Cloud 部署**：请将以下内容添加到 App Settings → Secrets，"
-                            "这样下次打开无需重新输入：\n\n"
-                            f"```toml\n{manual_toml}```"
-                        )
-                    st.rerun()
 
-        if st.session_state.pf_connected:
-            st.success(f"✅ 已连接  Gist: `{st.session_state.pf_gist_id}`")
-            if st.button("断开连接", use_container_width=True):
-                st.session_state.update({"pf_connected": False, "pf_token": "",
-                                          "pf_gist_id": "", "pf_data": None})
-                st.rerun()
+                    # ── Step 2 instructions: paste into Streamlit Cloud Secrets ──
+                    st.success(f"✅ 连接成功！GitHub @{user_or_err}  ·  Gist: `{gist_id}`")
+                    st.markdown(f"""
+#### 第二步：保存到 Streamlit Cloud（**只需做一次**）
 
-    if not st.session_state.pf_connected:
-        st.info("请先连接 GitHub Gist 以启用云端持仓功能")
+复制以下两行，粘贴到：
+**Streamlit Cloud → 你的 App → ⋮ → Settings → Secrets**
+
+```toml
+github_token = "{inp_token}"
+gist_id = "{gist_id}"
+```
+
+保存后刷新页面，以后打开 App 会**自动登录**，不需要再输入任何内容。
+""")
+                    st.button("✅ 我已保存，继续", use_container_width=True,
+                              key="after_save", on_click=st.rerun)
+                    st.stop()
+
+        st.info("配置完成后，你的持仓数据将安全地存储在 GitHub 私有 Gist，任何设备打开 App 都能自动读取。")
         st.stop()
 
     # ── Shorthand ─────────────────────────────────────────────────

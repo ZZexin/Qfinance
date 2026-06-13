@@ -8,7 +8,7 @@ import cloud
 import portfolio as pf
 
 st.set_page_config(
-    page_title="Qfinance",
+    page_title="秋秋炒股工具",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -364,7 +364,7 @@ def chart_balance(fin: dict) -> go.Figure | None:
 
 # ── main UI ───────────────────────────────────────────────────────────────────
 
-st.markdown("## 📊 Qfinance · 股票数据仪表板")
+st.markdown("## 📊 秋秋炒股工具 · 股票数据仪表板")
 st.caption("输入股票代码，自动抓取价格、财报、技术指标、新闻，图表化展示")
 
 col_inp, col_btn = st.columns([5, 1])

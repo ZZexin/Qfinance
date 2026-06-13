@@ -3,7 +3,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-from data import fetch_stock_data, compute_risk_signals
+from data import fetch_stock_data, compute_risk_signals, fetch_current_prices
+import cloud
+import portfolio as pf
 
 st.set_page_config(
     page_title="Qfinance",
@@ -398,39 +400,32 @@ if search_btn and ticker_input:
             st.stop()
 
 data = st.session_state.stock_data
-if data is None:
-    st.markdown("""
-| 板块 | 内容 |
-|------|------|
-| 📈 概览 | 关键指标、近90日走势、风险信号 |
-| 🕯 K线&技术指标 | 蜡烛图、MA/布林带、RSI、MACD、成交量 |
-| 📑 财务报表 | 收入利润趋势、利润率、现金流、资产负债 |
-| 📰 新闻&事件 | 最新公告、新闻、下次财报日期 |
-""")
-    st.stop()
 
-info      = data["info"]
-hist      = data["hist"]
-fin       = data["financials"]
-ticker    = data["ticker"]
-cur_price = float(hist["Close"].iloc[-1])
-prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else cur_price
-day_chg   = (cur_price - prev_close) / prev_close * 100
+# ── Tabs — always rendered so 💼 tab is reachable without a stock search ──────
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📈 概览", "🕯 K线 & 技术指标", "📑 财务报表", "📰 新闻 & 事件", "💼 模拟持仓"]
+)
 
-company_name = info.get("longName") or info.get("shortName") or ticker
-
-st.markdown(f"### {company_name}（{ticker}）")
-st.caption(f"{info.get('sector','—')} · {info.get('industry','—')} · {info.get('country','—')}")
-
-# ── tabs ──────────────────────────────────────────────────────────────────────
-
-tab1, tab2, tab3, tab4 = st.tabs(["📈 概览", "🕯 K线 & 技术指标", "📑 财务报表", "📰 新闻 & 事件"])
+if data is not None:
+    info       = data["info"]
+    hist       = data["hist"]
+    fin        = data["financials"]
+    ticker     = data["ticker"]
+    cur_price  = float(hist["Close"].iloc[-1])
+    prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else cur_price
+    day_chg    = (cur_price - prev_close) / prev_close * 100
+    company_name = info.get("longName") or info.get("shortName") or ticker
+    st.markdown(f"### {company_name}（{ticker}）")
+    st.caption(f"{info.get('sector','—')} · {info.get('industry','—')} · {info.get('country','—')}")
 
 
 # ════════════════════════════════════════════════════════════════
 # TAB 1 — OVERVIEW
 # ════════════════════════════════════════════════════════════════
 with tab1:
+  if data is None:
+    st.info("请在上方输入股票代码并查询")
+  if data is not None:
 
     # ── Metric cards row 1
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -504,6 +499,9 @@ with tab1:
 # TAB 2 — TECHNICAL
 # ════════════════════════════════════════════════════════════════
 with tab2:
+  if data is None:
+    st.info("请在上方输入股票代码并查询")
+  if data is not None:
     period = st.radio(
         "周期", ["1个月", "3个月", "6个月", "1年"],
         index=2, horizontal=True,
@@ -544,6 +542,9 @@ with tab2:
 # TAB 3 — FINANCIALS
 # ════════════════════════════════════════════════════════════════
 with tab3:
+  if data is None:
+    st.info("请在上方输入股票代码并查询")
+  if data is not None:
     col_a, col_b = st.columns(2)
 
     with col_a:
@@ -611,6 +612,9 @@ with tab3:
 # TAB 4 — NEWS
 # ════════════════════════════════════════════════════════════════
 with tab4:
+  if data is None:
+    st.info("请在上方输入股票代码并查询")
+  if data is not None:
     earnings = data.get("earnings_date")
     if earnings:
         st.info(f"📅 **下次财报日期：{earnings}**")
@@ -644,3 +648,285 @@ with tab4:
             )
     else:
         st.info("暂无最新新闻")
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 5 — PAPER TRADING PORTFOLIO
+# ════════════════════════════════════════════════════════════════
+with tab5:
+
+    # ── Session state init ────────────────────────────────────────
+    for k, v in [("pf_token", ""), ("pf_gist_id", ""),
+                 ("pf_data", None), ("pf_connected", False)]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # Auto-load saved credentials on first visit
+    if not st.session_state.pf_connected:
+        tok, gid = cloud.load_credentials()
+        if tok and gid:
+            st.session_state.pf_token   = tok
+            st.session_state.pf_gist_id = gid
+            try:
+                st.session_state.pf_data      = cloud.load(tok, gid)
+                st.session_state.pf_connected = True
+            except Exception:
+                pass
+
+    # ── Cloud connection panel ────────────────────────────────────
+    with st.expander("☁️ 云端连接（GitHub Gist）",
+                     expanded=not st.session_state.pf_connected):
+        st.caption("获取 Token：github.com/settings/tokens → Generate new token → 勾选 **gist** 权限")
+        col_t, col_g = st.columns([3, 2])
+        inp_token = col_t.text_input("GitHub Personal Access Token",
+                                     value=st.session_state.pf_token,
+                                     type="password", key="inp_token")
+        inp_gist  = col_g.text_input("Gist ID（留空自动创建）",
+                                     value=st.session_state.pf_gist_id,
+                                     key="inp_gist")
+
+        if st.button("连接 / 创建 Gist", use_container_width=True, type="primary"):
+            if not inp_token:
+                st.warning("请输入 GitHub Token")
+            else:
+                with st.spinner("验证 Token..."):
+                    ok, user_or_err = cloud.test_token(inp_token)
+                if not ok:
+                    st.error(f"Token 无效：{user_or_err}")
+                else:
+                    gist_id = inp_gist.strip()
+                    if not gist_id:
+                        with st.spinner("创建私有 Gist..."):
+                            gist_id = cloud.create_gist(inp_token)
+                    with st.spinner("加载数据..."):
+                        pf_data = cloud.load(inp_token, gist_id)
+                    cloud.save_credentials(inp_token, gist_id)
+                    st.session_state.update({
+                        "pf_token": inp_token, "pf_gist_id": gist_id,
+                        "pf_data": pf_data, "pf_connected": True,
+                    })
+                    st.success(f"✅ 已连接 GitHub @{user_or_err}，Gist ID: `{gist_id}`")
+                    st.rerun()
+
+        if st.session_state.pf_connected:
+            st.success(f"✅ 已连接  Gist: `{st.session_state.pf_gist_id}`")
+            if st.button("断开连接", use_container_width=True):
+                st.session_state.update({"pf_connected": False, "pf_token": "",
+                                          "pf_gist_id": "", "pf_data": None})
+                st.rerun()
+
+    if not st.session_state.pf_connected:
+        st.info("请先连接 GitHub Gist 以启用云端持仓功能")
+        st.stop()
+
+    # ── Shorthand ─────────────────────────────────────────────────
+    pf_data  = st.session_state.pf_data
+    pf_tok   = st.session_state.pf_token
+    pf_gid   = st.session_state.pf_gist_id
+    holdings = pf_data.get("holdings", [])
+
+    def _save():
+        cloud.save(pf_tok, pf_gid, pf_data)
+        st.session_state.pf_data = pf_data
+
+    # ── Refresh live prices & snapshot ────────────────────────────
+    if holdings:
+        with st.spinner("刷新实时价格..."):
+            live_prices = fetch_current_prices(holdings)
+        pf.append_snapshot(pf_data, live_prices)
+        _save()
+    else:
+        live_prices = {}
+
+    enriched = pf.holdings_with_prices(holdings, live_prices)
+
+    # ── Summary metrics ───────────────────────────────────────────
+    total_cost  = sum(h["shares"] * h["avg_cost"] for h in holdings)
+    total_value = sum(h.get("market_value") or h["shares"] * h["avg_cost"]
+                      for h in enriched)
+    total_pnl   = total_value - total_cost
+    total_pnl_p = total_pnl / total_cost * 100 if total_cost else 0
+    realized    = pf.realized_pnl_total(pf_data)
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("持仓数量",   f"{len(holdings)} 只")
+    mc2.metric("总投入成本", f"{total_cost:,.0f}")
+    mc3.metric("当前市值",   f"{total_value:,.0f}",
+               f"{total_pnl:+,.0f}")
+    mc4.metric("浮动盈亏%",  f"{total_pnl_p:+.2f}%",
+               delta_color="normal" if total_pnl_p >= 0 else "inverse")
+    mc5.metric("累计已实现盈亏", f"{realized:+,.2f}")
+
+    # ── P&L history chart ─────────────────────────────────────────
+    history = pf_data.get("value_history", [])
+    if len(history) >= 2:
+        hdf      = pd.DataFrame(history)
+        is_up    = float(hdf["pnl_pct"].iloc[-1]) >= 0
+        clr      = "#26a69a" if is_up else "#ef5350"
+        fig_pnl  = go.Figure()
+        fig_pnl.add_trace(go.Scatter(
+            x=hdf["date"], y=hdf["pnl_pct"],
+            mode="lines", name="浮动盈亏%",
+            line=dict(color=clr, width=2),
+            fill="tozeroy",
+            fillcolor=f"rgba({'38,166,154' if is_up else '239,83,80'},0.10)",
+            hovertemplate="%{x}<br>%{y:.2f}%<extra></extra>",
+        ))
+        fig_pnl.add_hline(y=0, line=dict(color="#94a3b8", width=1, dash="dot"))
+        fig_pnl.update_layout(
+            **PLOT_LAYOUT, height=260,
+            title=dict(text="持仓总盈亏 % 历史", x=0.01),
+            yaxis=dict(ticksuffix="%", gridcolor="#f3f4f6"),
+            xaxis=dict(gridcolor="#f3f4f6"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_pnl, use_container_width=True,
+                        config={"displayModeBar": False})
+
+    # ── Holdings table ────────────────────────────────────────────
+    st.markdown("#### 📋 当前持仓")
+    if enriched:
+        rows = []
+        for h in enriched:
+            ccy = h.get("currency", "$")
+            pnl_p = h.get("pnl_pct")
+            rows.append({
+                "代码":    h["ticker"],
+                "市场":    h.get("market", "—"),
+                "名称":    (h.get("name") or "")[:12],
+                "股数":    h["shares"],
+                "均价":    f"{ccy}{h['avg_cost']:.2f}",
+                "现价":    f"{ccy}{h['cur_price']:.2f}" if h["cur_price"] else "—",
+                "市值":    f"{ccy}{h['market_value']:,.0f}" if h["market_value"] else "—",
+                "浮盈":    f"{ccy}{h['pnl']:+,.2f}" if h["pnl"] is not None else "—",
+                "浮盈%":   f"{pnl_p:+.2f}%" if pnl_p is not None else "—",
+                "买入日":  h.get("first_bought", "—"),
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True,
+                     use_container_width=True,
+                     height=min(42 * len(rows) + 55, 380))
+    else:
+        st.info("暂无持仓，在下方买入第一只股票吧")
+
+    st.divider()
+
+    # ── Trade form ────────────────────────────────────────────────
+    st.markdown("#### 📝 模拟交易")
+    buy_tab, sell_tab = st.tabs(["🟢 买入", "🔴 卖出"])
+
+    with buy_tab:
+        bc1, bc2 = st.columns(2)
+        b_mkt    = bc1.selectbox("市场", ["US", "AU", "CN（沪）", "CN（深）", "HK"],
+                                  key="b_mkt")
+        b_raw    = bc2.text_input("股票代码",
+                                   value=data["ticker"] if data else "",
+                                   placeholder="如 AAPL / 600519",
+                                   key="b_raw")
+
+        # Normalize ticker
+        _sfx = {"AU": ".AX", "CN（沪）": ".SS", "CN（深）": ".SZ", "HK": ".HK", "US": ""}
+        b_ticker = (b_raw.strip().upper() + _sfx.get(b_mkt, "")) if b_raw else ""
+        b_mkt_key = b_mkt.split("（")[0]   # "US" / "AU" / "CN" / "HK"
+
+        bc3, bc4, bc5 = st.columns(3)
+        _ccy_map = {"US": "$", "AU": "A$", "CN（沪）": "¥", "CN（深）": "¥", "HK": "HK$"}
+        b_ccy    = _ccy_map.get(b_mkt, "$")
+
+        # Default price = live price of current queried stock, else 0
+        _default_price = 0.0
+        if data and b_ticker == data.get("ticker"):
+            _default_price = float(data["hist"]["Close"].iloc[-1])
+
+        b_shares = bc3.number_input("股数", min_value=0.0001, value=1.0,
+                                     format="%.4f", key="b_shares")
+        b_price  = bc4.number_input(f"成交价（{b_ccy}）",
+                                     min_value=0.0001, value=max(_default_price, 0.01),
+                                     format="%.4f", key="b_price")
+        b_note   = bc5.text_input("备注", placeholder="可选", key="b_note")
+
+        b_total = b_shares * b_price
+        st.caption(f"交易金额：{b_ccy}{b_total:,.2f}")
+
+        if st.button("✅ 确认买入", use_container_width=True, type="primary", key="do_buy"):
+            if not b_ticker:
+                st.warning("请输入股票代码")
+            else:
+                # Try to get company name
+                b_name = ""
+                try:
+                    import yfinance as _yf
+                    _info = _yf.Ticker(b_ticker).info
+                    b_name = _info.get("shortName") or _info.get("longName") or ""
+                except Exception:
+                    pass
+                pf.buy(pf_data, b_ticker, b_mkt_key, b_name,
+                       b_shares, b_price, b_ccy, b_note)
+                _save()
+                st.success(f"✅ 买入 {b_ticker} × {b_shares} @ {b_ccy}{b_price:.4f}")
+                st.rerun()
+
+    with sell_tab:
+        if not holdings:
+            st.info("暂无持仓可卖出")
+        else:
+            ticker_opts = [f"{h['ticker']} ({h['market']})" for h in holdings]
+            sel = st.selectbox("选择持仓", ticker_opts, key="s_sel")
+            idx = ticker_opts.index(sel)
+            sh  = holdings[idx]
+            ccy = sh.get("currency", "$")
+            cur = live_prices.get(sh["ticker"])
+
+            sc1, sc2, sc3 = st.columns(3)
+            s_shares = sc1.number_input("卖出股数",
+                                         min_value=0.0001, max_value=float(sh["shares"]),
+                                         value=float(sh["shares"]), format="%.4f", key="s_shares")
+            s_price  = sc2.number_input(f"成交价（{ccy}）",
+                                         min_value=0.0001,
+                                         value=float(cur) if cur else sh["avg_cost"],
+                                         format="%.4f", key="s_price")
+            s_note   = sc3.text_input("备注", placeholder="可选", key="s_note")
+
+            est_pnl = (s_price - sh["avg_cost"]) * s_shares
+            pnl_color = "🟢" if est_pnl >= 0 else "🔴"
+            st.caption(
+                f"持仓均价 {ccy}{sh['avg_cost']:.4f}  ·  "
+                f"预计{'盈利' if est_pnl >= 0 else '亏损'} {pnl_color} "
+                f"{ccy}{est_pnl:+,.2f}"
+            )
+
+            if st.button("✅ 确认卖出", use_container_width=True, type="primary", key="do_sell"):
+                _, realized, err = pf.sell(pf_data, sh["ticker"], sh["market"],
+                                            s_shares, s_price, s_note)
+                if err:
+                    st.error(err)
+                else:
+                    _save()
+                    st.success(
+                        f"✅ 卖出 {sh['ticker']} × {s_shares}  "
+                        f"已实现盈亏 {ccy}{realized:+,.2f}"
+                    )
+                    st.rerun()
+
+    # ── Transaction history ───────────────────────────────────────
+    txns = pf_data.get("transactions", [])
+    with st.expander(f"📜 交易记录（共 {len(txns)} 笔）", expanded=False):
+        if txns:
+            tx_rows = []
+            for t in reversed(txns):
+                ccy = t.get("currency", "$")
+                pnl = t.get("realized_pnl")
+                tx_rows.append({
+                    "日期":   t["date"],
+                    "操作":   "🟢 买入" if t["action"] == "buy" else "🔴 卖出",
+                    "代码":   t["ticker"],
+                    "名称":   (t.get("name") or "")[:10],
+                    "股数":   t["shares"],
+                    "价格":   f"{ccy}{t['price']:.4f}",
+                    "金额":   f"{ccy}{t['amount']:,.2f}",
+                    "已实现盈亏": f"{ccy}{pnl:+,.2f}" if pnl is not None else "—",
+                    "备注":   t.get("note", ""),
+                })
+            st.dataframe(pd.DataFrame(tx_rows), hide_index=True,
+                         use_container_width=True)
+        else:
+            st.info("暂无交易记录")

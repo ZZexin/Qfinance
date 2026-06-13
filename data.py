@@ -179,6 +179,8 @@ def fetch_stock_data(ticker: str, market: str = "🇺🇸 美股") -> dict:
 
     currency = get_currency(ticker, market)
 
+    signals = fetch_signals(ticker)
+
     return {
         "ticker":        ticker,
         "market":        market,
@@ -188,6 +190,7 @@ def fetch_stock_data(ticker: str, market: str = "🇺🇸 美股") -> dict:
         "financials":    fin,
         "news":          news,
         "earnings_date": earnings_date,
+        "signals":       signals,
     }
 
 
@@ -277,3 +280,226 @@ def compute_risk_signals(data: dict) -> list[dict]:
         elif pct < -20: add("⚠️", f"距52周高点跌幅 {pct:.1f}%", "warning")
 
     return signals
+
+
+# ── Multi-source analyst signals ───────────────────────────────────────────────
+
+def fetch_signals(ticker: str) -> dict:
+    """
+    Fetch multi-source analyst & insider data from yfinance.
+    Returns a dict suitable for compute_composite_score().
+    All errors are silently swallowed so a missing field never crashes the app.
+    """
+    stock = yf.Ticker(ticker)
+    result: dict = {}
+
+    def safe(fn, transform=None):
+        try:
+            df = fn()
+            if df is None or (hasattr(df, "empty") and df.empty):
+                return None
+            return transform(df) if transform else df
+        except Exception:
+            return None
+
+    def _df_to_records(df, n=None):
+        df2 = df.copy()
+        df2.columns = [str(c) for c in df2.columns]
+        for col in df2.columns:
+            if pd.api.types.is_datetime64_any_dtype(df2[col]):
+                df2[col] = df2[col].dt.strftime("%Y-%m-%d")
+        if n:
+            df2 = df2.head(n)
+        return df2.to_dict(orient="records")
+
+    # ── Analyst recommendation summary (strongBuy/buy/hold/sell/strongSell counts)
+    result["rec_summary"] = safe(
+        lambda: stock.recommendations_summary,
+        lambda df: df.head(4).to_dict(orient="records"),
+    )
+
+    # ── Recent upgrades / downgrades (last 6 months)
+    def _parse_upgrades(df):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        cutoff = pd.Timestamp.now() - pd.DateOffset(months=6)
+        recent = df[df.index >= cutoff].reset_index()
+        recent.columns = [str(c) for c in recent.columns]
+        date_col = recent.columns[0]
+        recent[date_col] = pd.to_datetime(recent[date_col]).dt.strftime("%Y-%m-%d")
+        return recent.head(25).to_dict(orient="records")
+
+    result["upgrades_downgrades"] = safe(lambda: stock.upgrades_downgrades, _parse_upgrades)
+
+    # ── Insider transactions
+    result["insider_transactions"] = safe(
+        lambda: stock.insider_transactions,
+        lambda df: _df_to_records(df, n=20),
+    )
+
+    # ── Major holders (insider % / institution %)
+    result["major_holders"] = safe(
+        lambda: stock.major_holders,
+        lambda df: df.to_dict(orient="records"),
+    )
+
+    # ── Top institutional holders
+    result["institutional_holders"] = safe(
+        lambda: stock.institutional_holders,
+        lambda df: _df_to_records(df, n=10),
+    )
+
+    return result
+
+
+def compute_composite_score(info: dict, signals: dict, hist: pd.DataFrame) -> dict:
+    """
+    Aggregate five independent signals into a single 0-100 composite score.
+    50 = neutral, >57 = bullish, >68 = strongly bullish (mirror image for bearish).
+
+    Weights:
+      35% Analyst consensus (strongBuy/buy/hold/sell/strongSell counts)
+      20% Price-target upside vs current price
+      15% Recent rating upgrades vs downgrades (6-month window)
+      15% Insider net buy / sell activity
+      15% Technical confirmation (RSI + MACD + MA alignment)
+    """
+
+    # ── Component 1: Analyst consensus ────────────────────────────────────────
+    rec_list   = signals.get("rec_summary") or []
+    latest_rec = rec_list[0] if rec_list else {}
+    sb  = int(latest_rec.get("strongBuy",   0) or 0)
+    b   = int(latest_rec.get("buy",         0) or 0)
+    h   = int(latest_rec.get("hold",        0) or 0)
+    s   = int(latest_rec.get("sell",        0) or 0)
+    ss  = int(latest_rec.get("strongSell",  0) or 0)
+    total_rec  = sb + b + h + s + ss
+    n_analysts = int(info.get("numberOfAnalystOpinions") or total_rec or 0)
+
+    consensus    = (sb*100 + b*75 + h*50 + s*25 + ss*0) / total_rec if total_rec else 50.0
+    analyst_cred = min(100.0, n_analysts / 25 * 100)
+
+    # ── Component 2: Price-target upside ──────────────────────────────────────
+    target = info.get("targetMeanPrice")
+    t_low  = info.get("targetLowPrice")
+    t_high = info.get("targetHighPrice")
+    cur    = float(info.get("currentPrice") or info.get("regularMarketPrice") or hist["Close"].iloc[-1])
+    upside_pct = None
+
+    if target and cur > 0:
+        upside     = (target - cur) / cur * 100
+        upside_pct = round(upside, 1)
+        target_score = max(0.0, min(100.0, 50 + upside * (50 / 30)))   # ±30% → 0–100
+        if t_high and t_low and target:
+            spread_pct   = (t_high - t_low) / target * 100
+            target_cred  = max(0.0, min(100.0, 100 - spread_pct))
+        else:
+            target_cred  = 40.0
+    else:
+        target_score = 50.0
+        target_cred  = 0.0
+
+    # ── Component 3: Upgrades vs downgrades ───────────────────────────────────
+    ud          = signals.get("upgrades_downgrades") or []
+    upgrades_n  = sum(1 for r in ud if str(r.get("Action", "")).lower() in ["up",   "upgrade"])
+    downgrades_n= sum(1 for r in ud if str(r.get("Action", "")).lower() in ["down", "downgrade"])
+    inits_n     = sum(1 for r in ud if str(r.get("Action", "")).lower() in ["init", "reit", "initiated"])
+    ud_net      = upgrades_n + downgrades_n
+    ud_score    = (upgrades_n / ud_net * 100) if ud_net else 50.0
+    ud_cred     = min(100.0, ud_net * 20)
+
+    # ── Component 4: Insider net buy/sell ─────────────────────────────────────
+    txns        = signals.get("insider_transactions") or []
+    net_val     = 0.0
+    buy_count   = sell_count = 0
+    for t in txns:
+        tx = str(t.get("Transaction", "") or "").lower()
+        try:
+            val = abs(float(
+                str(t.get("Value", 0) or 0)
+                .replace(",", "").replace("$", "").replace(" ", "")
+            ))
+        except (ValueError, TypeError):
+            val = 0.0
+        if any(w in tx for w in ["purchase", "buy", "acquisition", "acquired"]):
+            net_val += val;  buy_count += 1
+        elif any(w in tx for w in ["sale", "sell", "sold", "disposed"]):
+            net_val -= val;  sell_count += 1
+
+    if net_val > 1e5:
+        insider_score = min(100.0, 60 + (net_val / 2e6) * 20)
+    elif net_val < -1e5:
+        insider_score = max(0.0,  40 + (net_val / 2e6) * 20)
+    else:
+        insider_score = 50.0
+    insider_cred = min(100.0, (buy_count + sell_count) * 15)
+
+    # ── Component 5: Technical confirmation ───────────────────────────────────
+    last_rsi   = hist["RSI"].iloc[-1]
+    last_macd  = hist["MACD_Hist"].iloc[-1]
+    last_ma50  = hist["MA50"].iloc[-1]
+    last_ma200 = hist["MA200"].iloc[-1]
+    c_price    = float(hist["Close"].iloc[-1])
+
+    rsi_val    = float(last_rsi)  if pd.notna(last_rsi)  else 50.0
+    macd_bull  = bool(pd.notna(last_macd)  and float(last_macd)  > 0)
+    above_50   = bool(pd.notna(last_ma50)  and c_price > float(last_ma50))
+    above_200  = bool(pd.notna(last_ma200) and c_price > float(last_ma200))
+
+    macd_score = 70.0 if macd_bull else 30.0
+    if pd.notna(last_ma50) and pd.notna(last_ma200):
+        ma_score = 75.0 if (above_50 and above_200) else (25.0 if not (above_50 or above_200) else 50.0)
+    else:
+        ma_score = 50.0
+    tech_score = rsi_val * 0.35 + macd_score * 0.30 + ma_score * 0.35
+    tech_cred  = 85.0
+
+    # ── Weighted composite ────────────────────────────────────────────────────
+    components = {
+        "analyst":   {
+            "label": "分析师共识",  "score": consensus,      "weight": 0.35,
+            "cred": analyst_cred,
+            "counts": {"强买": sb, "买入": b, "持有": h, "卖出": s, "强卖": ss},
+            "n_analysts": n_analysts,
+        },
+        "target":    {
+            "label": "目标价空间",  "score": target_score,   "weight": 0.20,
+            "cred": target_cred,   "upside_pct": upside_pct,
+        },
+        "ratings":   {
+            "label": "评级动向",    "score": ud_score,        "weight": 0.15,
+            "cred": ud_cred,       "upgrades": upgrades_n,
+            "downgrades": downgrades_n, "initiations": inits_n,
+        },
+        "insider":   {
+            "label": "内部人交易",  "score": insider_score,   "weight": 0.15,
+            "cred": insider_cred,  "net_value": round(net_val),
+            "buy_count": buy_count, "sell_count": sell_count,
+        },
+        "technical": {
+            "label": "技术面确认",  "score": tech_score,      "weight": 0.15,
+            "cred": tech_cred,     "rsi": round(rsi_val, 1),
+            "macd_bull": macd_bull, "above_ma50": above_50, "above_ma200": above_200,
+        },
+    }
+
+    composite = sum(c["score"] * c["weight"] for c in components.values())
+    avg_cred  = sum(c["cred"]  * c["weight"] for c in components.values())
+
+    if   composite >= 68: direction, clr = "强烈看多", "#16a34a"
+    elif composite >= 57: direction, clr = "看多",     "#22c55e"
+    elif composite >= 43: direction, clr = "中性观望", "#f59e0b"
+    elif composite >= 32: direction, clr = "看空",     "#ef4444"
+    else:                 direction, clr = "强烈看空", "#dc2626"
+
+    return {
+        "composite":   round(composite, 1),
+        "credibility": round(avg_cred,  1),
+        "direction":   direction,
+        "color":       clr,
+        "components":  components,
+        "n_analysts":  n_analysts,
+        "upside_pct":  upside_pct,
+        "upgrades":    upgrades_n,
+        "downgrades":  downgrades_n,
+    }

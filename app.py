@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-from data import fetch_stock_data, compute_risk_signals, fetch_current_prices
+from data import fetch_stock_data, compute_risk_signals, fetch_current_prices, compute_composite_score
 import cloud
 import portfolio as pf
 
@@ -70,6 +70,181 @@ def fmt_num(v, decimals=2):
     if v is None:
         return "N/A"
     return f"{v:.{decimals}f}"
+
+
+# ── signal chart builders ─────────────────────────────────────────────────────
+
+def chart_gauge(score: float, direction: str, credibility: float, color: str) -> go.Figure:
+    """Half-gauge (0-100) composite score indicator."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        number={"font": {"size": 40, "color": color}, "suffix": ""},
+        title={"text": f"<b style='font-size:1.1em'>{direction}</b>"
+                       f"<br><span style='font-size:0.75em;color:#6b7280'>"
+                       f"综合可信度 {credibility:.0f}%</span>"},
+        gauge={
+            "axis": {
+                "range": [0, 100],
+                "tickvals": [0, 25, 50, 75, 100],
+                "ticktext": ["强空", "看空", "中性", "看多", "强多"],
+                "tickfont": {"size": 10},
+            },
+            "bar":    {"color": color, "thickness": 0.22},
+            "bgcolor": "rgba(0,0,0,0)",
+            "steps": [
+                {"range": [0,  32],  "color": "rgba(220,38,38,0.12)"},
+                {"range": [32, 43],  "color": "rgba(239,68,68,0.07)"},
+                {"range": [43, 57],  "color": "rgba(156,163,175,0.07)"},
+                {"range": [57, 68],  "color": "rgba(34,197,94,0.07)"},
+                {"range": [68, 100], "color": "rgba(22,163,74,0.12)"},
+            ],
+            "threshold": {
+                "line": {"color": color, "width": 4},
+                "thickness": 0.85,
+                "value": score,
+            },
+        },
+    ))
+    fig.update_layout(
+        height=260,
+        margin=dict(l=30, r=30, t=80, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def chart_rec_breakdown(counts: dict, n_analysts: int) -> go.Figure:
+    """Stacked horizontal bar: strongBuy / buy / hold / sell / strongSell."""
+    cats   = ["强卖", "卖出", "持有", "买入", "强买"]
+    clrs   = ["#dc2626", "#f87171", "#94a3b8", "#4ade80", "#16a34a"]
+    vals   = [counts.get(c, 0) for c in cats]
+    total  = sum(vals) or 1
+
+    fig = go.Figure()
+    for cat, val, clr in zip(cats, vals, clrs):
+        pct = val / total * 100
+        fig.add_trace(go.Bar(
+            name=cat, x=[val], y=["评级"],
+            orientation="h",
+            marker_color=clr,
+            text=f"{cat} {val}" if val > 0 else "",
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate=f"{cat}: {val}人 ({pct:.0f}%)<extra></extra>",
+        ))
+
+    fig.update_layout(
+        barmode="stack",
+        height=90,
+        margin=dict(l=0, r=0, t=10, b=35),
+        showlegend=True,
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.6,
+                    font=dict(size=11)),
+        xaxis=dict(showticklabels=False, showgrid=False, range=[0, total * 1.02]),
+        yaxis=dict(showticklabels=False),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[dict(
+            text=f"共 {n_analysts} 位分析师",
+            x=0.5, y=1.3, xref="paper", yref="paper",
+            showarrow=False, font=dict(size=11, color="#6b7280"),
+        )],
+    )
+    return fig
+
+
+def chart_target_range(cur: float, t_low: float, t_mean: float,
+                        t_high: float, currency: str = "$") -> go.Figure:
+    """Bullet chart: current price vs analyst target price range."""
+    fig = go.Figure()
+
+    # Range bar (low → high)
+    fig.add_trace(go.Scatter(
+        x=[t_low, t_high], y=[0, 0],
+        mode="lines",
+        line=dict(color="#94a3b8", width=14),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+    # Mean target
+    fig.add_trace(go.Scatter(
+        x=[t_mean], y=[0],
+        mode="markers+text",
+        marker=dict(color="#3b82f6", size=16, symbol="diamond"),
+        text=[f"目标均价<br>{currency}{t_mean:.2f}"],
+        textposition="top center",
+        name="分析师目标价（均）",
+        hovertemplate=f"目标均价: {currency}{t_mean:.2f}<extra></extra>",
+    ))
+    # Current price
+    fig.add_trace(go.Scatter(
+        x=[cur], y=[0],
+        mode="markers+text",
+        marker=dict(color="#ef5350", size=16, symbol="circle"),
+        text=[f"现价<br>{currency}{cur:.2f}"],
+        textposition="bottom center",
+        name="当前价格",
+        hovertemplate=f"当前价: {currency}{cur:.2f}<extra></extra>",
+    ))
+    # Low / High labels
+    for val, label in [(t_low, f"低 {currency}{t_low:.0f}"), (t_high, f"高 {currency}{t_high:.0f}")]:
+        fig.add_annotation(x=val, y=0, text=label, showarrow=False,
+                           yshift=-28, font=dict(size=10, color="#6b7280"))
+
+    fig.update_layout(
+        height=160,
+        margin=dict(l=20, r=20, t=10, b=40),
+        showlegend=True,
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.5,
+                    font=dict(size=11)),
+        xaxis=dict(showgrid=False, showticklabels=False,
+                   range=[t_low * 0.92, t_high * 1.08]),
+        yaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
+                   range=[-0.5, 0.6]),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def chart_signal_components(components: dict) -> go.Figure:
+    """Horizontal bar chart showing each sub-signal score with credibility annotation."""
+    labels = [c["label"] for c in components.values()]
+    scores = [c["score"] for c in components.values()]
+    creds  = [c["cred"]  for c in components.values()]
+    weights= [c["weight"] for c in components.values()]
+
+    bar_colors = [
+        "#16a34a" if s >= 68 else "#22c55e" if s >= 57 else
+        "#94a3b8" if s >= 43 else "#f87171" if s >= 32 else "#dc2626"
+        for s in scores
+    ]
+    texts = [
+        f"  {s:.0f}/100  （可信度 {c:.0f}%，权重 {w*100:.0f}%）"
+        for s, c, w in zip(scores, creds, weights)
+    ]
+
+    fig = go.Figure(go.Bar(
+        y=labels, x=scores, orientation="h",
+        marker_color=bar_colors,
+        text=texts,
+        textposition="outside",
+        hovertemplate="%{y}: %{x:.1f}/100<extra></extra>",
+    ))
+    fig.add_vline(x=50, line=dict(color="#9ca3af", dash="dash", width=1))
+
+    fig.update_layout(
+        height=280,
+        margin=dict(l=10, r=160, t=10, b=10),
+        xaxis=dict(range=[0, 120], showgrid=False, showticklabels=False),
+        yaxis=dict(autorange="reversed"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
 
 
 # ── chart builders ────────────────────────────────────────────────────────────
@@ -402,8 +577,8 @@ if search_btn and ticker_input:
 data = st.session_state.stock_data
 
 # ── Tabs — always rendered so 💼 tab is reachable without a stock search ──────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📈 概览", "🕯 K线 & 技术指标", "📑 财务报表", "📰 新闻 & 事件", "💼 模拟持仓"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["📈 概览", "🕯 K线 & 技术指标", "📑 财务报表", "📰 新闻 & 事件", "🔍 信号分析", "💼 模拟持仓"]
 )
 
 if data is not None:
@@ -651,9 +826,280 @@ with tab4:
 
 
 # ════════════════════════════════════════════════════════════════
-# TAB 5 — PAPER TRADING PORTFOLIO
+# TAB 5 — MULTI-SOURCE SIGNAL ANALYSIS
 # ════════════════════════════════════════════════════════════════
 with tab5:
+  if data is None:
+    st.info("请在上方输入股票代码并查询")
+  if data is not None:
+    signals_raw = data.get("signals", {})
+    score_data  = compute_composite_score(info, signals_raw, hist)
+
+    comp       = score_data["components"]
+    currency   = data.get("currency", "$")
+
+    # ── Row 1: Composite gauge + component bar ─────────────────────
+    col_gauge, col_bar = st.columns([1, 1.4])
+
+    with col_gauge:
+        st.markdown("#### 综合信号评分")
+        st.plotly_chart(
+            chart_gauge(
+                score_data["composite"],
+                score_data["direction"],
+                score_data["credibility"],
+                score_data["color"],
+            ),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+        # Mini legend boxes
+        legend_items = [
+            ("强烈看多 ≥68", "#16a34a"), ("看多 57–68", "#22c55e"),
+            ("中性 43–57", "#94a3b8"),   ("看空 32–43", "#f87171"),
+            ("强烈看空 <32", "#dc2626"),
+        ]
+        legend_html = "".join(
+            f"<span style='display:inline-block;width:10px;height:10px;"
+            f"background:{c};border-radius:2px;margin-right:4px;margin-left:8px'></span>"
+            f"<span style='font-size:0.75rem;color:#6b7280'>{lbl}</span>"
+            for lbl, c in legend_items
+        )
+        st.markdown(legend_html, unsafe_allow_html=True)
+
+    with col_bar:
+        st.markdown("#### 各维度评分明细")
+        st.caption("每条：0=极度看空  50=中性  100=极度看多  |  括号内为当前信号对综合分的可信度与权重")
+        st.plotly_chart(
+            chart_signal_components(comp),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+
+    st.divider()
+
+    # ── Row 2: Analyst consensus + target price ────────────────────
+    col_rec, col_tp = st.columns([1, 1])
+
+    with col_rec:
+        st.markdown("#### 📊 分析师评级共识")
+        c_analyst  = comp["analyst"]
+        counts     = c_analyst["counts"]
+        n_ana      = c_analyst["n_analysts"]
+        if sum(counts.values()) > 0:
+            st.plotly_chart(
+                chart_rec_breakdown(counts, n_ana),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            # Recommendation key from info
+            rec_key = info.get("recommendationKey", "")
+            rec_mean = info.get("recommendationMean")
+            if rec_key:
+                key_map = {
+                    "strong_buy": ("强烈买入", "#16a34a"),
+                    "buy":        ("买入",     "#22c55e"),
+                    "hold":       ("持有",     "#f59e0b"),
+                    "sell":       ("卖出",     "#ef4444"),
+                    "strong_sell":("强烈卖出", "#dc2626"),
+                }
+                lbl, clr = key_map.get(rec_key.lower(), (rec_key, "#6b7280"))
+                mean_txt = f"  （评级均值 {rec_mean:.2f}/5.0）" if rec_mean else ""
+                st.markdown(
+                    f"<div style='background:{clr}22;border:1px solid {clr}66;"
+                    f"border-radius:6px;padding:8px 14px;font-size:0.9rem'>"
+                    f"<b style='color:{clr}'>综合建议：{lbl}</b>{mean_txt}</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("暂无分析师评级数据（该股票可能覆盖较少或为非美股）")
+
+    with col_tp:
+        st.markdown("#### 🎯 分析师目标价区间")
+        target   = info.get("targetMeanPrice")
+        t_low    = info.get("targetLowPrice")
+        t_high   = info.get("targetHighPrice")
+        upside   = score_data.get("upside_pct")
+        if target and t_low and t_high:
+            st.plotly_chart(
+                chart_target_range(cur_price, t_low, target, t_high, currency),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            up_clr = "#22c55e" if (upside or 0) >= 0 else "#ef4444"
+            st.markdown(
+                f"<div style='font-size:0.88rem;color:#6b7280'>"
+                f"目标价区间：{currency}{t_low:.2f} – {currency}{t_high:.2f}  |  "
+                f"均值目标价：{currency}{target:.2f}  |  "
+                f"<b style='color:{up_clr}'>潜在空间：{upside:+.1f}%</b></div>" if upside is not None else
+                f"目标价均值：{currency}{target:.2f}",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("暂无目标价数据")
+
+    st.divider()
+
+    # ── Row 3: Rating changes + insider activity ───────────────────
+    col_ud, col_ins = st.columns([1, 1])
+
+    with col_ud:
+        st.markdown("#### 📋 近6个月评级变动")
+        c_ratings = comp["ratings"]
+        ud_list   = signals_raw.get("upgrades_downgrades") or []
+        up_n, dn_n, init_n = c_ratings["upgrades"], c_ratings["downgrades"], c_ratings["initiations"]
+
+        if ud_list:
+            # Summary chips
+            chips_html = ""
+            if up_n:
+                chips_html += (
+                    f"<span style='background:#d1fae5;border:1px solid #6ee7b7;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem;"
+                    f"margin-right:6px'>⬆️ 上调 {up_n}</span>"
+                )
+            if dn_n:
+                chips_html += (
+                    f"<span style='background:#fee2e2;border:1px solid #fca5a5;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem;"
+                    f"margin-right:6px'>⬇️ 下调 {dn_n}</span>"
+                )
+            if init_n:
+                chips_html += (
+                    f"<span style='background:#dbeafe;border:1px solid #93c5fd;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem;"
+                    f"margin-right:6px'>🆕 首评 {init_n}</span>"
+                )
+            if chips_html:
+                st.markdown(chips_html, unsafe_allow_html=True)
+                st.markdown("")
+
+            # Table
+            date_col  = list(ud_list[0].keys())[0]   # first col is the date
+            rows = []
+            for r in ud_list[:12]:
+                action_raw = str(r.get("Action", ""))
+                action_map = {
+                    "up": "⬆️ 上调", "down": "⬇️ 下调",
+                    "init": "🆕 首评", "reit": "🔄 重申",
+                    "main": "✅ 维持", "upgrade": "⬆️ 上调", "downgrade": "⬇️ 下调",
+                }
+                action_lbl = action_map.get(action_raw.lower(), action_raw)
+                rows.append({
+                    "日期":   str(r.get(date_col, ""))[:10],
+                    "机构":   str(r.get("Firm", r.get("firm", ""))),
+                    "动作":   action_lbl,
+                    "新评级": str(r.get("ToGrade",   r.get("toGrade",   ""))),
+                    "原评级": str(r.get("FromGrade", r.get("fromGrade", ""))),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, height=300)
+        else:
+            st.info("暂无近期评级变动记录")
+
+    with col_ins:
+        st.markdown("#### 🏠 内部人交易（近期）")
+        c_insider  = comp["insider"]
+        txn_list   = signals_raw.get("insider_transactions") or []
+        net_val    = c_insider["net_value"]
+        buy_n, sell_n = c_insider["buy_count"], c_insider["sell_count"]
+
+        if txn_list:
+            # Net summary chip
+            if net_val > 1e5:
+                chip_html = (
+                    f"<span style='background:#d1fae5;border:1px solid #6ee7b7;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem'>"
+                    f"💚 净买入 +{currency}{abs(net_val)/1e6:.2f}M（买入{buy_n}笔 / 卖出{sell_n}笔）</span>"
+                )
+            elif net_val < -1e5:
+                chip_html = (
+                    f"<span style='background:#fee2e2;border:1px solid #fca5a5;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem'>"
+                    f"🔴 净卖出 -{currency}{abs(net_val)/1e6:.2f}M（买入{buy_n}笔 / 卖出{sell_n}笔）</span>"
+                )
+            else:
+                chip_html = (
+                    f"<span style='background:#f3f4f6;border:1px solid #d1d5db;"
+                    f"border-radius:12px;padding:3px 10px;font-size:0.8rem'>"
+                    f"⚪ 净活动较小（买入{buy_n}笔 / 卖出{sell_n}笔）</span>"
+                )
+            st.markdown(chip_html, unsafe_allow_html=True)
+            st.markdown("")
+
+            rows = []
+            for t in txn_list[:10]:
+                tx_str = str(t.get("Transaction", "") or "")
+                if any(w in tx_str.lower() for w in ["purchase", "buy", "acqui"]):
+                    icon = "💚"
+                elif any(w in tx_str.lower() for w in ["sale", "sell", "dispos"]):
+                    icon = "🔴"
+                else:
+                    icon = "⚪"
+                rows.append({
+                    "日期":   str(t.get("Date",     t.get("date",     "")))[:10],
+                    "内部人": str(t.get("Insider",  t.get("insider",  ""))),
+                    "职位":   str(t.get("Position", t.get("position", ""))),
+                    "操作":   f"{icon} {tx_str}",
+                    "价值($)":str(t.get("Value",    t.get("value",    ""))),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, height=300)
+        else:
+            st.info("暂无内部人交易记录（通常仅美股 SEC 披露）")
+
+    st.divider()
+
+    # ── Row 4: Institutional holders ──────────────────────────────
+    st.markdown("#### 🏦 主要机构持仓")
+    inst_col, major_col = st.columns([2, 1])
+
+    with inst_col:
+        inst_list = signals_raw.get("institutional_holders") or []
+        if inst_list:
+            df_inst = pd.DataFrame(inst_list)
+            # Rename common column patterns
+            rename_map = {
+                "Holder": "机构名称", "holder": "机构名称",
+                "Shares": "持股数量", "shares": "持股数量",
+                "Date Reported": "报告日期", "dateReported": "报告日期",
+                "% Out": "持股比例", "pctHeld": "持股比例",
+                "Value": "持仓价值", "value": "持仓价值",
+            }
+            df_inst = df_inst.rename(columns={k: v for k, v in rename_map.items() if k in df_inst.columns})
+            st.dataframe(df_inst, hide_index=True, use_container_width=True, height=300)
+        else:
+            st.info("暂无机构持仓数据")
+
+    with major_col:
+        major_list = signals_raw.get("major_holders") or []
+        if major_list:
+            st.markdown("**持股结构**")
+            for row in major_list:
+                vals = list(row.values())
+                if len(vals) >= 2:
+                    pct_val, pct_lbl = str(vals[0]), str(vals[1])
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"padding:5px 0;border-bottom:1px solid #f3f4f6;font-size:0.85rem'>"
+                        f"<span style='color:#6b7280'>{pct_lbl}</span>"
+                        f"<b>{pct_val}</b></div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.info("暂无持股结构数据")
+
+    # ── Credibility footnote ───────────────────────────────────────
+    st.markdown("")
+    st.caption(
+        "💡 可信度说明：综合可信度由各信号的分析师覆盖数、评级变动频率、"
+        "内部人交易数量及目标价收窄程度共同决定，数据越多覆盖越广可信度越高。"
+        "本工具仅供参考，不构成投资建议。"
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 6 — PAPER TRADING PORTFOLIO
+# ════════════════════════════════════════════════════════════════
+with tab6:
 
     # ── Session state init ────────────────────────────────────────
     for k, v in [("pf_token", ""), ("pf_gist_id", ""),

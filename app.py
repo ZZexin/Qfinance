@@ -685,6 +685,15 @@ with tab5:
                                      value=st.session_state.pf_gist_id,
                                      key="inp_gist")
 
+        # ── Token type hint ───────────────────────────────────────────
+        if inp_token.startswith("github_pat_"):
+            st.warning(
+                "⚠️ 检测到 Fine-grained token。请确认创建时已勾选：\n"
+                "**Account permissions → Gists → Access: Read and write**\n\n"
+                "如果没有勾选，请删除并重新生成，或改用 **Classic token**（推荐）：\n"
+                "github.com/settings/tokens/new → 勾选 **gist** → Generate token"
+            )
+
         if st.button("连接 / 创建 Gist", use_container_width=True, type="primary"):
             if not inp_token:
                 st.warning("请输入 GitHub Token")
@@ -692,20 +701,35 @@ with tab5:
                 with st.spinner("验证 Token..."):
                     ok, user_or_err = cloud.test_token(inp_token)
                 if not ok:
-                    st.error(f"Token 无效：{user_or_err}")
+                    st.error(f"❌ Token 验证失败：{user_or_err}")
                 else:
                     gist_id = inp_gist.strip()
-                    if not gist_id:
-                        with st.spinner("创建私有 Gist..."):
-                            gist_id = cloud.create_gist(inp_token)
-                    with st.spinner("加载数据..."):
-                        pf_data = cloud.load(inp_token, gist_id)
-                    cloud.save_credentials(inp_token, gist_id)
+                    try:
+                        if not gist_id:
+                            with st.spinner("创建私有 Gist..."):
+                                gist_id = cloud.create_gist(inp_token)
+                        with st.spinner("加载数据..."):
+                            pf_data = cloud.load(inp_token, gist_id)
+                    except PermissionError as e:
+                        st.error(f"❌ {e}")
+                        st.stop()
+                    except Exception as e:
+                        st.error(f"❌ 连接失败：{e}")
+                        st.stop()
+
+                    # Save credentials (may fail on Streamlit Cloud)
+                    manual_toml = cloud.save_credentials(inp_token, gist_id)
                     st.session_state.update({
                         "pf_token": inp_token, "pf_gist_id": gist_id,
                         "pf_data": pf_data, "pf_connected": True,
                     })
-                    st.success(f"✅ 已连接 GitHub @{user_or_err}，Gist ID: `{gist_id}`")
+                    st.success(f"✅ 已连接 GitHub @{user_or_err}  ·  Gist: `{gist_id}`")
+                    if manual_toml:
+                        st.info(
+                            "📋 **Streamlit Cloud 部署**：请将以下内容添加到 App Settings → Secrets，"
+                            "这样下次打开无需重新输入：\n\n"
+                            f"```toml\n{manual_toml}```"
+                        )
                     st.rerun()
 
         if st.session_state.pf_connected:

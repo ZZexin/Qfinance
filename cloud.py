@@ -52,6 +52,14 @@ def create_gist(token: str) -> str:
         },
         timeout=10,
     )
+    if r.status_code == 401:
+        raise PermissionError("Token 无效或已过期（401 Unauthorized）")
+    if r.status_code == 403:
+        raise PermissionError(
+            "Token 没有 Gist 权限（403 Forbidden）。\n"
+            "Fine-grained token 需要在创建时勾选 Account permissions → Gists → Read and write。\n"
+            "或改用 Classic token（github.com/settings/tokens/new），勾选 gist 权限。"
+        )
     r.raise_for_status()
     return r.json()["id"]
 
@@ -84,13 +92,26 @@ def save(token: str, gist_id: str, data: dict):
     r.raise_for_status()
 
 
-def save_credentials(token: str, gist_id: str):
-    """Persist token + gist_id to .streamlit/secrets.toml (never committed to git)."""
-    SECRETS_PATH.parent.mkdir(exist_ok=True)
-    SECRETS_PATH.write_text(
-        f'github_token = "{token}"\ngist_id = "{gist_id}"\n',
-        encoding="utf-8",
-    )
+def save_credentials(token: str, gist_id: str) -> str:
+    """
+    Try to persist token + gist_id to .streamlit/secrets.toml.
+    On Streamlit Cloud the filesystem is read-only, so this may fail —
+    the caller should catch the return value and show the manual instructions.
+    Returns "" on success, or an instruction string if the file can't be written.
+    """
+    try:
+        SECRETS_PATH.parent.mkdir(exist_ok=True)
+        SECRETS_PATH.write_text(
+            f'github_token = "{token}"\ngist_id = "{gist_id}"\n',
+            encoding="utf-8",
+        )
+        return ""
+    except OSError:
+        # Streamlit Cloud or other read-only environments
+        return (
+            f'github_token = "{token}"\n'
+            f'gist_id = "{gist_id}"\n'
+        )
 
 
 def load_credentials() -> tuple[str, str]:

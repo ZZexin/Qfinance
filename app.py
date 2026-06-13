@@ -23,26 +23,69 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* ══════════════════════════════════════════════════════
+   CSS Variables — Light Mode (default)
+   ══════════════════════════════════════════════════════ */
+:root {
+  --pill-success-bg:  #d1fae5; --pill-success-bd: #6ee7b7; --pill-success-tx: #065f46;
+  --pill-warning-bg:  #fef3c7; --pill-warning-bd: #fcd34d; --pill-warning-tx: #78350f;
+  --pill-danger-bg:   #fee2e2; --pill-danger-bd:  #fca5a5; --pill-danger-tx:  #7f1d1d;
+  --pill-info-bg:     #dbeafe; --pill-info-bd:    #93c5fd;  --pill-info-tx:    #1e3a8a;
+  --news-bg:          #f0f7ff; --news-title-tx:   #111827;  --news-body-tx:    #374151;
+  --news-meta-tx:     #6b7280;
+}
+
+/* ══════════════════════════════════════════════════════
+   CSS Variables — Dark Mode
+   Streamlit dark mode follows prefers-color-scheme,
+   so this selector covers both the OS setting and the
+   Streamlit manual dark toggle (via [data-theme=dark]).
+   ══════════════════════════════════════════════════════ */
+@media (prefers-color-scheme: dark) { :root {
+  --pill-success-bg:  #052e16; --pill-success-bd: #166534; --pill-success-tx: #4ade80;
+  --pill-warning-bg:  #3f1a00; --pill-warning-bd: #b45309; --pill-warning-tx: #fcd34d;
+  --pill-danger-bg:   #450a0a; --pill-danger-bd:  #991b1b; --pill-danger-tx:  #fca5a5;
+  --pill-info-bg:     #0c1a3d; --pill-info-bd:    #1d4ed8;  --pill-info-tx:    #93c5fd;
+  --news-bg:          #0f172a; --news-title-tx:   #f1f5f9;  --news-body-tx:    #cbd5e1;
+  --news-meta-tx:     #94a3b8;
+}}
+
+/* Streamlit's own dark-mode class (manual toggle inside app) */
+[data-theme="dark"] {
+  --pill-success-bg:  #052e16; --pill-success-bd: #166534; --pill-success-tx: #4ade80;
+  --pill-warning-bg:  #3f1a00; --pill-warning-bd: #b45309; --pill-warning-tx: #fcd34d;
+  --pill-danger-bg:   #450a0a; --pill-danger-bd:  #991b1b; --pill-danger-tx:  #fca5a5;
+  --pill-info-bg:     #0c1a3d; --pill-info-bd:    #1d4ed8;  --pill-info-tx:    #93c5fd;
+  --news-bg:          #0f172a; --news-title-tx:   #f1f5f9;  --news-body-tx:    #cbd5e1;
+  --news-meta-tx:     #94a3b8;
+}
+
 /* ── Global ── */
 .main .block-container { padding: 1rem 1rem 2rem; max-width: 900px; }
 h1 { font-size: 1.5rem !important; }
 h3 { font-size: 1.1rem !important; }
 
 /* ── Risk/signal pills ── */
-.pill { display:inline-block; border-radius:6px; padding:5px 10px;
-        margin:3px 0; font-size:0.82rem; width:100%; box-sizing:border-box; }
-.pill-success { background:#d1fae5; border:1px solid #6ee7b7; color:#065f46; }
-.pill-warning { background:#fef3c7; border:1px solid #fcd34d; color:#78350f; }
-.pill-danger  { background:#fee2e2; border:1px solid #fca5a5; color:#7f1d1d; }
-.pill-info    { background:#dbeafe; border:1px solid #93c5fd; color:#1e3a8a; }
+.pill {
+  display: inline-block; border-radius: 6px; padding: 5px 10px;
+  margin: 3px 0; font-size: 0.82rem; width: 100%; box-sizing: border-box;
+  transition: background 0.2s, color 0.2s;
+}
+.pill-success { background: var(--pill-success-bg); border: 1px solid var(--pill-success-bd); color: var(--pill-success-tx); }
+.pill-warning { background: var(--pill-warning-bg); border: 1px solid var(--pill-warning-bd); color: var(--pill-warning-tx); }
+.pill-danger  { background: var(--pill-danger-bg);  border: 1px solid var(--pill-danger-bd);  color: var(--pill-danger-tx);  }
+.pill-info    { background: var(--pill-info-bg);    border: 1px solid var(--pill-info-bd);    color: var(--pill-info-tx);    }
 
 /* ── News cards ── */
-.news-card { border-left:3px solid #3b82f6; background:#f0f7ff;
-             border-radius:4px; padding:10px 12px; margin-bottom:8px; }
-
-/* ── Portfolio table row colors ── */
-.pnl-pos { color: #16a34a; font-weight:600; }
-.pnl-neg { color: #dc2626; font-weight:600; }
+.news-card {
+  border-left: 3px solid #3b82f6;
+  background: var(--news-bg);
+  border-radius: 4px; padding: 10px 12px; margin-bottom: 8px;
+  transition: background 0.2s;
+}
+.news-card strong { color: var(--news-title-tx); }
+.news-card .news-meta { color: var(--news-meta-tx); }
+.news-card .news-body { color: var(--news-body-tx); font-size: 0.88rem; }
 
 /* ── Mobile: reduce padding ── */
 @media (max-width: 640px) {
@@ -539,9 +582,10 @@ if data:
             st.markdown(f"#### 最新新闻（{len(news)} 条）")
             for item in news:
                 st.markdown(
-                    f'<div class="news-card"><strong>{item["title"]}</strong><br>'
-                    f'<small style="color:#6b7280">{item["publisher"]} · {item["date"]}</small>'
-                    + (f'<br><span style="color:#374151;font-size:0.88rem">{item["summary"]}</span>' if item.get("summary") else "")
+                    f'<div class="news-card">'
+                    f'<strong>{item["title"]}</strong><br>'
+                    f'<span class="news-meta">{item["publisher"]} · {item["date"]}</span>'
+                    + (f'<br><span class="news-body">{item["summary"]}</span>' if item.get("summary") else "")
                     + "</div>",
                     unsafe_allow_html=True)
         else:
